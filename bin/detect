@@ -11,7 +11,7 @@ if test -f "${build}/go.mod" || #go modules
    test -f "${build}/glide.yaml" || # glide
    (test -d "${build}/src" && test -n "$(find "${build}/src" -mindepth 2 -type f -name '*.go' | sed 1q)") # gb
 then
-  echo Go
+  echo Gox
 else
   exit 1
 fi

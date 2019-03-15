@@ -75,6 +75,12 @@ if [ -z "${pkgs}" ]; then
     fi
 fi
 
+# Remove prior build in favor of gox
+source "${build}/.heroku/go/.meta"
+priorBin="${build}/bin/${NAME}"
+echo "-----> Running: rm ${priorBin}"
+rm $priorBin
+
 # Start build ...
 echo "-----> Running: gox ${GOXOPTS[@]} ${FLAGS[@]} ${pkgs}"
 gox -output $build/"$GOXOUTPUT" "${GOXOPTS[@]}" "${FLAGS[@]}" ${pkgs} 2>&1
