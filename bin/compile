@@ -77,7 +77,7 @@ fi
 
 # Remove prior build in favor of gox
 source "${build}/.heroku/go/.meta"
-priorBin="${build}/bin/${NAME}"
+priorBin="${build}/bin/$(basename $NAME)"
 echo "-----> Running: rm ${priorBin}"
 rm $priorBin
 
