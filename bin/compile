@@ -34,9 +34,31 @@ fi
 
 # -----------------------------------------
 # Go compiler should've been installed by heroku-buildpack-go
+# Auto-detect GOROOT from the cache if GOVERSION is not explicitly set
 
-goVersion=${GOVERSION:-go1.12}
-export GOROOT="${cache}/${goVersion}/go"
+if [ -n "${GOVERSION}" ]; then
+    # Explicit version: try both cache layouts
+    if [ -d "${cache}/.heroku/go/${GOVERSION}/go" ]; then
+        export GOROOT="${cache}/.heroku/go/${GOVERSION}/go"
+    else
+        export GOROOT="${cache}/${GOVERSION}/go"
+    fi
+else
+    # Auto-detect: find the Go installation in the cache
+    goRoot=""
+    for d in "${cache}/.heroku/go"/go*/go "${cache}"/go*/go; do
+        if [ -x "${d}/bin/go" ]; then
+            goRoot="${d}"
+        fi
+    done
+    if [ -z "${goRoot}" ]; then
+        echo "-----> ERROR: Could not find Go installation in cache"
+        echo "       Set GOVERSION or ensure heroku-buildpack-go runs first"
+        exit 1
+    fi
+    export GOROOT="${goRoot}"
+    echo "-----> Detected Go: $(${GOROOT}/bin/go version)"
+fi
 PATH="${GOROOT}/bin:${PATH}"
 GOPATH="${build}"
 
