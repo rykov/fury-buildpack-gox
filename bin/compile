@@ -7,26 +7,21 @@ mkdir -p "$1" "$2"
 build=$(cd "$1/" && pwd)
 cache=$(cd "$2/" && pwd)
 env_dir=$3
-buildpack=$(cd "$(dirname $0)/.." && pwd)
+hostos=$(uname|tr A-Z a-z)
 arch=$(uname -m|tr A-Z a-z)
 if test $arch = x86_64
 then arch=amd64
 fi
-plat=$(uname|tr A-Z a-z)-$arch
-PATH=$buildpack/$plat/bin:$PATH
-goMOD="${build}/go.mod"
 
 # -----------------------------------------
 # load environment variables
 # allow apps to specify cgo flags. The literal text '${build_dir}' is substituted for the build directory
-if [ ! -z "${env_dir}" ]
-then
+if [ -n "${env_dir}" ]; then
     mkdir -p "${env_dir}"
     env_dir=$(cd "${env_dir}/" && pwd)
-  for key in CGO_CFLAGS CGO_CPPFLAGS CGO_CXXFLAGS CGO_LDFLAGS GO_LINKER_SYMBOL GO_LINKER_VALUE GO15VENDOREXPERIMENT GOVERSION GO_OSARCH GO_INSTALL_PACKAGE_SPEC GOPROXY GOPRIVATE GONOPROXY
+    for key in CGO_CFLAGS CGO_CPPFLAGS CGO_CXXFLAGS CGO_LDFLAGS GO_LINKER_SYMBOL GO_LINKER_VALUE GOVERSION GO_OSARCH GO_INSTALL_PACKAGE_SPEC GOPROXY GOPRIVATE GONOPROXY
     do
-        if [ -f "${env_dir}/${key}" ]
-        then
+        if [ -f "${env_dir}/${key}" ]; then
             export "${key}=$(cat "${env_dir}/${key}" | sed -e "s:\${build_dir}:${build}:")"
         fi
     done
@@ -40,13 +35,17 @@ if [ -n "${GOVERSION}" ]; then
     # Explicit version: try both cache layouts
     if [ -d "${cache}/.heroku/go/${GOVERSION}/go" ]; then
         export GOROOT="${cache}/.heroku/go/${GOVERSION}/go"
-    else
+    elif [ -d "${cache}/${GOVERSION}/go" ]; then
         export GOROOT="${cache}/${GOVERSION}/go"
+    else
+        echo "-----> ERROR: Could not find Go ${GOVERSION} in cache"
+        echo "       Ensure heroku-buildpack-go runs first"
+        exit 1
     fi
 else
     # Auto-detect: find the Go installation in the cache
     goRoot=""
-    for d in "${cache}/.heroku/go"/go*/go "${cache}"/go*/go; do
+    for d in "${cache}"/go*/go "${cache}/.heroku/go"/go*/go; do
         if [ -x "${d}/bin/go" ]; then
             goRoot="${d}"
         fi
@@ -60,35 +59,21 @@ else
     echo "-----> Detected Go: $(${GOROOT}/bin/go version)"
 fi
 PATH="${GOROOT}/bin:${PATH}"
-GOPATH="${build}"
 
-# If $GO_LINKER_SYMBOL and GO_LINKER_VALUE are set, tell the linker to DTRT
+# Build flags
+# Default GO_LINKER_VALUE to SOURCE_VERSION if not set via env_dir
+: "${GO_LINKER_VALUE:=${SOURCE_VERSION}}"
+
 FLAGS=(-tags heroku)
-if [ -n "${GO_LINKER_SYMBOL}" -a -n "${GO_LINKER_VALUE}" ]
-then
-    case $ver in
-    go1.5*|go1.6*|go1.7*|go1.8*)
-        xval="${GO_LINKER_SYMBOL}=${GO_LINKER_VALUE}"
-        ;;
-    *)
-        xval="${GO_LINKER_SYMBOL} ${GO_LINKER_VALUE}"
-        ;;
-    esac
-    FLAGS=(${FLAGS[@]} -ldflags "-X ${xval}")
+if [ -n "${GO_LINKER_SYMBOL}" -a -n "${GO_LINKER_VALUE}" ]; then
+    FLAGS+=(-ldflags "-X ${GO_LINKER_SYMBOL}=${GO_LINKER_VALUE}")
 fi
 
-# Default to $SOURCE_VERSION environment variable: https://devcenter.heroku.com/articles/buildpack-api#bin-compile
-GO_LINKER_VALUE=${SOURCE_VERSION}
-
-# Cross-compiling architecture
-GOXOPTS=(-verbose -osarch "${GO_OSARCH:-$(uname|tr A-Z a-z)/$arch}")
-GOXOUTPUT="bin/{{.Dir}}"
-if test -n "$GO_OSARCH"; then
-  GOXOUTPUT="$GOXOUTPUT-{{.OS}}-{{.Arch}}"
-fi
+# Cross-compiling OS/arch pairs (space-separated, e.g. "linux/amd64 darwin/arm64")
+osarch="${GO_OSARCH:-${hostos}/$arch}"
 
 # Find package path to build
-pkgs=${GO_INSTALL_PACKAGE_SPEC:-$(awk '{ if ($1 == "//" && $2 == "+heroku" && $3 == "install" ) { print substr($0, index($0,$4)); exit }}' ${goMOD})}
+pkgs=${GO_INSTALL_PACKAGE_SPEC:-$(awk '{ if ($1 == "//" && $2 == "+heroku" && $3 == "install" ) { print substr($0, index($0,$4)); exit }}' "${build}/go.mod")}
 if [ -z "${pkgs}" ]; then
     if [ -d "${build}/cmd" ]; then
         pkgs="./cmd/..."
@@ -97,12 +82,36 @@ if [ -z "${pkgs}" ]; then
     fi
 fi
 
-# Remove prior build in favor of gox
-source "${build}/.heroku/go/.meta"
-priorBin="${build}/bin/$(basename $NAME)"
-echo "-----> Running: rm ${priorBin}"
-rm $priorBin
+# Resolve package list (expand ... patterns)
+cd "${build}"
+pkgList=$(go list ${pkgs})
 
-# Start build ...
-echo "-----> Running: gox ${GOXOPTS[@]} ${FLAGS[@]} ${pkgs}"
-gox -output $build/"$GOXOUTPUT" "${GOXOPTS[@]}" "${FLAGS[@]}" ${pkgs} 2>&1
+# Remove prior build from heroku-buildpack-go
+source "${build}/.heroku/go/.meta"
+priorBin="${build}/bin/$(basename "$NAME")"
+echo "-----> Running: rm ${priorBin}"
+rm "${priorBin}"
+
+# Cross-compile each package for each OS/arch pair
+for pair in ${osarch}; do
+    goos="${pair%%/*}"
+    goarch="${pair##*/}"
+
+    for pkg in ${pkgList}; do
+        pkgName=$(basename "${pkg}")
+
+        if [ -n "${GO_OSARCH}" ]; then
+            output="${build}/bin/${pkgName}-${goos}-${goarch}"
+        else
+            output="${build}/bin/${pkgName}"
+        fi
+
+        echo "-----> Building ${pkg} for ${goos}/${goarch}..."
+        cgo=0
+        if [ "${goos}" = "${hostos}" ] && [ "${goarch}" = "${arch}" ]; then
+            cgo=${CGO_ENABLED:-1}
+        fi
+        GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED="${cgo}" \
+            go build -o "${output}" "${FLAGS[@]}" "${pkg}" 2>&1
+    done
+done
